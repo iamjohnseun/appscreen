@@ -548,9 +548,22 @@
                 <div id="rotation-3d-options" style="display: none;">
                     <div class="control-group">
                         <label class="control-label">Device Model</label>
-                        <div class="btn-group" id="device-3d-selector">
-                            <button class="active" data-model="iphone">iPhone</button>
-                            <button data-model="samsung">Samsung</button>
+                        <div class="device-3d-dropdown" id="device-3d-dropdown">
+                            <button class="device-3d-trigger" id="device-3d-trigger" type="button">
+                                <span class="device-3d-name" id="device-3d-name">iPhone</span>
+                                <svg class="dropdown-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="6 9 12 15 18 9"/>
+                                </svg>
+                            </button>
+                            <div class="device-3d-menu" id="device-3d-menu">
+                                <div class="device-3d-group-label">Phones</div>
+                                <div class="device-3d-option selected" data-model="iphone">iPhone</div>
+                                <div class="device-3d-option" data-model="samsung">Samsung Galaxy</div>
+                                <div class="device-3d-divider"></div>
+                                <div class="device-3d-group-label">Tablets</div>
+                                <div class="device-3d-option" data-model="ipad">iPad Pro</div>
+                                <div class="device-3d-option" data-model="galaxy_tab">Galaxy Tab A8</div>
+                            </div>
                         </div>
                     </div>
                     <div class="control-group">
@@ -782,11 +795,27 @@
                 </div>
                 </div><!-- end 2d-only-settings -->
 
-                <div id="3d-tip" class="tip-box" style="display: none;">
-                    <img src="img/info.svg" width="16" height="16" alt="Info">
-                    <div class="tip-content">
-                        <strong>Interactive Controls</strong>
-                        <span>Drag on preview to rotate • Alt+drag to move</span>
+                <div id="3d-tip" style="display: none;">
+                    <div class="control-group">
+                        <label class="control-label">Screen Scale</label>
+                        <div class="control-row">
+                            <input type="range" id="screen-adjust-scale" min="80" max="110" value="100">
+                            <span class="range-value" id="screen-adjust-scale-value">100%</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Horizontal Position</label>
+                        <div class="control-row">
+                            <input type="range" id="screen-adjust-x" min="-50" max="50" value="0">
+                            <span class="range-value" id="screen-adjust-x-value">0</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Vertical Position</label>
+                        <div class="control-row">
+                            <input type="range" id="screen-adjust-y" min="-50" max="50" value="0">
+                            <span class="range-value" id="screen-adjust-y-value">0</span>
+                        </div>
                     </div>
                 </div>
             </div>

@@ -34,18 +34,66 @@ const deviceConfigs = {
         aspectRatio: 1290 / 2796,
         screenHeightFactor: 0.826,
         screenOffset: { x: 0.027, y: 0.745, z: 0.098 },
-        positionOffsetFactor: 0.81,
         cornerRadiusFactor: 0.16,
-        modelRotation: { x: 0, y: 0, z: 0 }  // No correction needed
+        modelRotation: { x: 0, y: 0, z: 0 },  // No correction needed
+        camera: { distance: 6, fov: 35 },
+        type: 'phone',
+        label: 'iPhone'
     },
     samsung: {
         modelPath: 'models/samsung-galaxy-s25-ultra.glb',
         aspectRatio: 1440 / 3120,
         screenHeightFactor: 0.66,
         screenOffset: { x: 0, y: 0.0, z: 0.08},  // Will need adjustment
-        positionOffsetFactor: 0.5,
         cornerRadiusFactor: 0.04,
-        modelRotation: { x: 0, y: 0, z: 0 }  // Adjust to correct model tilt (in degrees)
+        modelRotation: { x: 0, y: 0, z: 0 },  // Adjust to correct model tilt (in degrees)
+        camera: { distance: 6, fov: 35 },
+        type: 'phone',
+        label: 'Samsung Galaxy'
+    },
+    ipad: {
+        modelPath: 'models/apple_ipad_pro.glb',
+        // Everything below is a first-pass guess pending visual calibration in-browser
+        // 0.82 (down from an initial 0.85 guess) - measured empirically to sit as close to the
+        // bezel edge as possible at rest without overflowing, and confirmed to still stay fully
+        // contained at extreme rotation angles (pixel-level overflow measurement, not eyeballing).
+        // The Screen Scale slider lets the user push it further if they want an edge-to-edge
+        // look and are willing to accept the small overflow risk that comes with extreme
+        // rotation + max scale together.
+        screenHeightFactor: 0.82,
+        screenOffset: { x: 0, y: 0, z: 0.05 },  // Will need adjustment
+        aspectRatio: 2064 / 2752,  // iPad Pro portrait screen resolution
+        cornerRadiusFactor: 0.06,
+        modelRotation: { x: 0, y: 0, z: 0 },  // Adjust to correct model tilt (in degrees)
+        camera: { distance: 7.5, fov: 35 },  // Pulled back further than phones to fit a larger device
+        // This model's own "screen" mesh renders on top of our screenshot overlay regardless
+        // of depth/side settings (likely a shader/material forcing it to always draw on top) -
+        // hiding it lets our overlay show through cleanly. Confirmed by name via mesh listing.
+        hideMeshNames: ['iPad_Pro_2020_screen_0'],
+        type: 'tablet',
+        label: 'iPad Pro'
+    },
+    galaxy_tab: {
+        modelPath: 'models/samsung_tab_a8.glb',
+        // This model's thin/depth axis is native X (not Z like the phone models) - its screen
+        // mesh (Cube001_Material004_0, the only textured mesh, confirming it's the baked
+        // lock-screen wallpaper) measures local center [0.033, 0.973, 0.060], face spanning
+        // Y/Z. modelRotation reorients the body so that native X (screen-facing) maps to
+        // world Z (camera-facing) - first-pass guess, needs visual confirmation like the rest.
+        aspectRatio: 1.707 / 2.739,  // screen mesh's own Y/Z face dimensions
+        // 0.80 (down from an initial 0.85 guess) - measured empirically to sit as close to the
+        // bezel edge as possible at rest without overflowing, and confirmed to still stay fully
+        // contained at extreme rotation angles (pixel-level overflow measurement, not eyeballing).
+        screenHeightFactor: 0.80,
+        screenOffset: { x: 0.033, y: 0.973, z: 0.060 },
+        cornerRadiusFactor: 0.06,
+        modelRotation: { x: -90, y: 0, z: -90 },  // rotates native X (screen-facing) to face camera, right-side up
+        camera: { distance: 7.5, fov: 35 },  // Pulled back further than phones to fit a larger device
+        // Same "screen mesh always renders on top" issue as the iPad model - hiding it lets
+        // our screenshot overlay show through.
+        hideMeshNames: ['Cube001_Material004_0'],
+        type: 'tablet',
+        label: 'Galaxy Tab A8'
     }
 };
 
@@ -208,10 +256,96 @@ function initThreeJS() {
         }
     }
     currentDeviceModel = deviceToLoad;
+    applyCameraForDevice(currentDeviceModel);
     loadPhoneModel();
 
     // Start animation loop
     animateThreeJS();
+}
+
+// Compute the screen plane's local position: the device's base screenOffset plus a small
+// user-tunable nudge (screenAdjust, from the position fine-tune sliders), expressed as a
+// fraction of the plane's own local size so the nudge scales sensibly across devices.
+function computeScreenPlaneOffset(config, planeWidth, planeHeight, screenAdjust) {
+    const adjust = screenAdjust || { x: 0, y: 0 };
+    // Damping factor kept small (not a bigger "reposition" range) so that even at the slider's
+    // extremes, the nudge stays within the safety margin already built into each device's
+    // screenHeightFactor - the whole point of this control is a small fine-tune, not something
+    // that can push the screenshot back out past the bezel.
+    const nudgeX = (adjust.x / 100) * planeWidth * 0.08;
+    const nudgeY = (adjust.y / 100) * planeHeight * 0.08;
+    return {
+        x: config.screenOffset.x + nudgeX,
+        y: config.screenOffset.y + nudgeY,
+        z: config.screenOffset.z
+    };
+}
+
+// Live-update the screen plane's fine-tune position nudge (from the position sliders) without a
+// full model reload - mirrors setThreeJSRotation()'s pattern for the rotation sliders.
+function applyScreenAdjustOffset(offsetX, offsetY) {
+    if (!customScreenPlane || !currentDeviceModel) return;
+    const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
+    const planeHeight = (4.3 * config.screenHeightFactor) / baseModelScale;
+    const planeWidth = planeHeight * config.aspectRatio;
+    const pos = computeScreenPlaneOffset(config, planeWidth, planeHeight, { x: offsetX, y: offsetY });
+    customScreenPlane.position.set(pos.x, pos.y, pos.z);
+    requestThreeJSRender();
+}
+
+// Live-update the screen plane's fine-tune scale (from the Screen Scale slider) without a full
+// model reload - mirrors setThreeJSRotation()'s pattern for the rotation sliders. Scaling the
+// mesh itself (rather than recreating the geometry) keeps this cheap and always scales from the
+// plane's own center, which is the intuitive behavior for a "make the screenshot bigger/smaller"
+// control.
+function applyScreenScale(scalePercent) {
+    if (!customScreenPlane) return;
+    customScreenPlane.scale.setScalar((scalePercent || 100) / 100);
+    requestThreeJSRender();
+}
+
+// Apply the true inverse of a device's modelRotation to an object (the screen plane), so it
+// cancels out the pivot's rotation and always ends up facing forward.
+//
+// Naively negating each Euler component (old approach: rotation.set(-rx, -ry, -rz)) only
+// produces the correct inverse when modelRotation has a single non-zero axis - for a compound
+// rotation (multiple non-zero axes, needed by models whose native axis layout doesn't already
+// match the phone convention), negating each component independently is NOT the mathematical
+// inverse, since Euler angle composition doesn't commute - it leaves a residual rotation that
+// can point the plane's texture-bearing face away from the camera (rendering as backface-culled/
+// invisible) even though position/sizing are all correct. Quaternion inversion is correct
+// regardless of how many axes are involved.
+function applyInverseModelRotation(object, modelRot) {
+    const euler = new THREE.Euler(
+        modelRot.x * Math.PI / 180,
+        modelRot.y * Math.PI / 180,
+        modelRot.z * Math.PI / 180,
+        'XYZ'
+    );
+    const quat = new THREE.Quaternion().setFromEuler(euler).invert();
+    object.quaternion.copy(quat);
+}
+
+// Hide any meshes a device config flags as needing to be hidden - e.g. a model's own baked
+// "screen" mesh that would otherwise render on top of our synthetic screenshot overlay
+function hideConfiguredMeshes(model, config) {
+    const namesToHide = config.hideMeshNames || [];
+    if (!namesToHide.length) return;
+    model.traverse((child) => {
+        if (child.isMesh && namesToHide.includes(child.name)) {
+            child.visible = false;
+        }
+    });
+}
+
+// Apply a device's baseline camera distance/FOV (tablets need a wider/further framing than phones)
+function applyCameraForDevice(deviceType) {
+    if (!threeCamera) return;
+    const config = deviceConfigs[deviceType] || deviceConfigs.iphone;
+    const cam = config.camera || { distance: 6, fov: 35 };
+    threeCamera.position.z = cam.distance;
+    threeCamera.fov = cam.fov;
+    threeCamera.updateProjectionMatrix();
 }
 
 // Load the phone 3D model based on currentDeviceModel
@@ -219,13 +353,27 @@ function loadPhoneModel() {
     if (phoneModelLoading) return; // Prevent double loading
     phoneModelLoading = true;
 
-    const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
+    const deviceType = currentDeviceModel;
+    const config = deviceConfigs[deviceType] || deviceConfigs.iphone;
     const loader = new THREE.GLTFLoader();
 
     loader.load(
         config.modelPath,
         (gltf) => {
             phoneModelLoading = false;
+
+            // See the matching guard/comment in switchPhoneModel() - discard this result if a
+            // switch to a different device happened while this load was in flight.
+            if (currentDeviceModel !== deviceType) {
+                gltf.scene.traverse((child) => {
+                    if (child.isMesh) {
+                        child.geometry?.dispose();
+                        child.material?.dispose();
+                    }
+                });
+                return;
+            }
+
             phoneModel = gltf.scene;
 
             // Center and scale the model
@@ -308,6 +456,7 @@ function loadPhoneModel() {
 
             // Create a custom screen plane overlay since the model's UV mapping may be incorrect
             createScreenOverlay();
+            hideConfiguredMeshes(phoneModel, config);
 
             phoneModelLoaded = true;
 
@@ -360,6 +509,7 @@ function switchPhoneModel(deviceType) {
 
     // Update current device type
     currentDeviceModel = deviceType;
+    applyCameraForDevice(currentDeviceModel);
     phoneModelLoading = false; // Reset so we can load the new one
 
     // Remove current pivot (which contains the model) from scene
@@ -395,6 +545,21 @@ function switchPhoneModel(deviceType) {
     loader.load(
         config.modelPath,
         (gltf) => {
+            // If a newer switchPhoneModel() call has already moved on to a different device by
+            // the time this (slower) load finishes, discard it - otherwise this stale callback
+            // would overwrite the current device's phoneModel/phonePivot with the wrong model's
+            // geometry while createScreenOverlay() below reads the (by-then-current) OTHER
+            // device's config, producing a corrupted mix of the two devices.
+            if (currentDeviceModel !== deviceType) {
+                gltf.scene.traverse((child) => {
+                    if (child.isMesh) {
+                        child.geometry?.dispose();
+                        child.material?.dispose();
+                    }
+                });
+                return;
+            }
+
             phoneModel = gltf.scene;
 
             // Center and scale the model
@@ -424,6 +589,7 @@ function switchPhoneModel(deviceType) {
 
             // Create screen overlay for this device
             createScreenOverlay();
+            hideConfiguredMeshes(phoneModel, config);
 
             phoneModelLoaded = true;
 
@@ -508,8 +674,10 @@ function loadCachedPhoneModel(deviceType) {
                 pivot.add(model);
 
                 // Create screen plane for this model
+                // Divide by modelBaseScale since this plane is parented under model, which
+                // already carries that scale - see the matching comment in createScreenOverlay().
                 const aspectRatio = config.aspectRatio;
-                const planeHeight = 4.3 * config.screenHeightFactor;
+                const planeHeight = (4.3 * config.screenHeightFactor) / modelBaseScale;
                 const planeWidth = planeHeight * aspectRatio;
 
                 const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
@@ -522,13 +690,10 @@ function loadCachedPhoneModel(deviceType) {
                 screenPlane.position.set(screenOffset.x, screenOffset.y, screenOffset.z);
 
                 const modelRot = config.modelRotation || { x: 0, y: 0, z: 0 };
-                screenPlane.rotation.set(
-                    -modelRot.x * Math.PI / 180,
-                    -modelRot.y * Math.PI / 180,
-                    -modelRot.z * Math.PI / 180
-                );
+                applyInverseModelRotation(screenPlane, modelRot);
 
                 model.add(screenPlane);
+                hideConfiguredMeshes(model, config);
 
                 phoneModelCache[deviceType] = {
                     model: model,
@@ -573,8 +738,12 @@ function createScreenOverlay() {
     const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
 
     // Use device-specific aspect ratio and screen size
+    // Divide by baseModelScale since this plane is parented under phoneModel, which already
+    // carries that scale - without this, the plane's world size is only correct by coincidence
+    // for models whose native GLB scale happens to normalize to ~1 (e.g. the original iPhone/
+    // Samsung models), and comes out wildly wrong-sized for any GLB authored at a different scale.
     const aspectRatio = config.aspectRatio;
-    const planeHeight = 4.3 * config.screenHeightFactor;
+    const planeHeight = (4.3 * config.screenHeightFactor) / baseModelScale;
     const planeWidth = planeHeight * aspectRatio;
 
     const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
@@ -585,18 +754,17 @@ function createScreenOverlay() {
 
     customScreenPlane = new THREE.Mesh(geometry, material);
 
-    // Position at center of phone, slightly in front of glass
-    const screenOffset = config.screenOffset;
-    customScreenPlane.position.set(screenOffset.x, screenOffset.y, screenOffset.z);
+    // Position at center of phone, slightly in front of glass, plus this screenshot's own
+    // fine-tune position nudge (if any)
+    const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
+    const initialPos = computeScreenPlaneOffset(config, planeWidth, planeHeight, ss?.screenAdjust);
+    customScreenPlane.position.set(initialPos.x, initialPos.y, initialPos.z);
+    customScreenPlane.scale.setScalar((ss?.screenScale || 100) / 100);
 
     // Counter-rotate the screen to cancel out the model's base rotation
     // This keeps the screen facing forward when the pivot applies the base rotation
     const modelRot = config.modelRotation || { x: 0, y: 0, z: 0 };
-    customScreenPlane.rotation.set(
-        -modelRot.x * Math.PI / 180,
-        -modelRot.y * Math.PI / 180,
-        -modelRot.z * Math.PI / 180
-    );
+    applyInverseModelRotation(customScreenPlane, modelRot);
 
     // Add directly to phoneModel so it moves with it
     phoneModel.add(customScreenPlane);
@@ -744,69 +912,91 @@ function renderThreeJSToCanvas(targetCanvas, width, height) {
     const originalPosition = phonePivot.position.clone();
     const originalScale = phonePivot.scale.clone();
     const originalRotation = phonePivot.rotation.clone();
+    const originalPlanePosition = customScreenPlane ? customScreenPlane.position.clone() : null;
+    const originalPlaneScale = customScreenPlane ? customScreenPlane.scale.clone() : null;
+    const oldSize = { width: 400, height: 700 };
 
-    // Apply position, scale, and rotation from screenshot settings
-    if (typeof state !== 'undefined') {
-        // Use getScreenshotSettings() helper if available, otherwise fall back to defaults
-        const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
-        if (ss) {
-            // Scale: use screenshot.scale to adjust model size
-            const screenshotScale = ss.scale / 100;
-            phonePivot.scale.setScalar(screenshotScale);
+    try {
+        // Apply position, scale, and rotation from screenshot settings
+        if (typeof state !== 'undefined') {
+            // Use getScreenshotSettings() helper if available, otherwise fall back to defaults
+            const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
+            if (ss) {
+                // Scale: use screenshot.scale to adjust model size
+                const screenshotScale = ss.scale / 100;
+                phonePivot.scale.setScalar(screenshotScale);
 
-            // Position: match 2D behavior where available space depends on (1 - scale)
-            // This ensures same percentages look the same in 2D and 3D
-            // X uses smaller factor (1.1) since canvas is taller than wide (400x700 aspect)
-            const availableSpaceY = (1 - screenshotScale) * 2;
-            const availableSpaceX = (1 - screenshotScale) * 0.9;
-            const xOffset = ((ss.x - 50) / 50) * availableSpaceX;
-            const yOffset = -((ss.y - 50) / 50) * availableSpaceY; // Inverted for 3D
-            phonePivot.position.set(
-                xOffset + basePositionOffset.x,
-                yOffset + basePositionOffset.y,
-                basePositionOffset.z
-            );
+                // Position: match 2D behavior where available space depends on (1 - scale)
+                // This ensures same percentages look the same in 2D and 3D
+                // X uses smaller factor (1.1) since canvas is taller than wide (400x700 aspect)
+                const availableSpaceY = (1 - screenshotScale) * 2;
+                const availableSpaceX = (1 - screenshotScale) * 0.9;
+                const xOffset = ((ss.x - 50) / 50) * availableSpaceX;
+                const yOffset = -((ss.y - 50) / 50) * availableSpaceY; // Inverted for 3D
+                phonePivot.position.set(
+                    xOffset + basePositionOffset.x,
+                    yOffset + basePositionOffset.y,
+                    basePositionOffset.z
+                );
 
-            // Rotation: apply 3D rotation from current screenshot settings + model base rotation
-            const rotation3D = ss.rotation3D || { x: 0, y: 0, z: 0 };
-            const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
-            const modelRot = config.modelRotation || { x: 0, y: 0, z: 0 };
-            phonePivot.rotation.set(
-                (rotation3D.x + modelRot.x) * Math.PI / 180,
-                (rotation3D.y + modelRot.y) * Math.PI / 180,
-                (rotation3D.z + modelRot.z) * Math.PI / 180
-            );
+                // Rotation: apply 3D rotation from current screenshot settings + model base rotation
+                const rotation3D = ss.rotation3D || { x: 0, y: 0, z: 0 };
+                const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
+                const modelRot = config.modelRotation || { x: 0, y: 0, z: 0 };
+                phonePivot.rotation.set(
+                    (rotation3D.x + modelRot.x) * Math.PI / 180,
+                    (rotation3D.y + modelRot.y) * Math.PI / 180,
+                    (rotation3D.z + modelRot.z) * Math.PI / 180
+                );
+
+                // Screen position nudge: re-apply THIS screenshot's own fine-tune offset every
+                // render - customScreenPlane.position otherwise only changes via direct slider
+                // calls or model reload, so switching to a different screenshot of the SAME
+                // device type (no reload) would otherwise keep showing a stale nudge value.
+                if (customScreenPlane) {
+                    const planeHeight = (4.3 * config.screenHeightFactor) / baseModelScale;
+                    const planeWidth = planeHeight * config.aspectRatio;
+                    const pos = computeScreenPlaneOffset(config, planeWidth, planeHeight, ss.screenAdjust);
+                    customScreenPlane.position.set(pos.x, pos.y, pos.z);
+                    customScreenPlane.scale.setScalar((ss.screenScale || 100) / 100);
+                }
+            }
+        }
+
+        // Set transparent background for compositing
+        threeScene.background = null;
+        threeRenderer.setClearColor(0x000000, 0); // Fully transparent clear color
+
+        // Temporarily resize renderer
+        threeRenderer.setSize(dims.width, dims.height);
+        threeCamera.aspect = dims.width / dims.height;
+        threeCamera.updateProjectionMatrix();
+
+        // Clear the renderer before drawing (ensures clean transparency)
+        threeRenderer.clear();
+
+        // Render with transparency
+        threeRenderer.render(threeScene, threeCamera);
+
+        // Draw to target canvas (compositing the 3D phone onto existing content)
+        const ctx = targetCanvas.getContext('2d');
+        ctx.drawImage(threeRenderer.domElement, 0, 0, dims.width, dims.height);
+    } finally {
+        // Restore size, background, and model transforms - always, even if the render/draw above threw
+        threeRenderer.setSize(oldSize.width, oldSize.height);
+        threeCamera.aspect = oldSize.width / oldSize.height;
+        threeCamera.updateProjectionMatrix();
+        threeScene.background = originalBackground;
+        phonePivot.position.copy(originalPosition);
+        phonePivot.scale.copy(originalScale);
+        phonePivot.rotation.copy(originalRotation);
+        if (customScreenPlane && originalPlanePosition) {
+            customScreenPlane.position.copy(originalPlanePosition);
+        }
+        if (customScreenPlane && originalPlaneScale) {
+            customScreenPlane.scale.copy(originalPlaneScale);
         }
     }
-
-    // Set transparent background for compositing
-    threeScene.background = null;
-    threeRenderer.setClearColor(0x000000, 0); // Fully transparent clear color
-
-    // Temporarily resize renderer
-    const oldSize = { width: 400, height: 700 };
-    threeRenderer.setSize(dims.width, dims.height);
-    threeCamera.aspect = dims.width / dims.height;
-    threeCamera.updateProjectionMatrix();
-
-    // Clear the renderer before drawing (ensures clean transparency)
-    threeRenderer.clear();
-
-    // Render with transparency
-    threeRenderer.render(threeScene, threeCamera);
-
-    // Draw to target canvas (compositing the 3D phone onto existing content)
-    const ctx = targetCanvas.getContext('2d');
-    ctx.drawImage(threeRenderer.domElement, 0, 0, dims.width, dims.height);
-
-    // Restore size, background, and model transforms
-    threeRenderer.setSize(oldSize.width, oldSize.height);
-    threeCamera.aspect = oldSize.width / oldSize.height;
-    threeCamera.updateProjectionMatrix();
-    threeScene.background = originalBackground;
-    phonePivot.position.copy(originalPosition);
-    phonePivot.scale.copy(originalScale);
-    phonePivot.rotation.copy(originalRotation);
 }
 
 // Render 3D for a specific screenshot index (used for side previews)
@@ -826,12 +1016,13 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
     const useCurrentModel = screenshotDeviceType === currentDeviceModel && phonePivot;
 
     // Get the model to use (either current or from cache)
-    let pivotToUse, screenPlaneToUse;
+    let pivotToUse, screenPlaneToUse, baseScaleToUse;
 
     if (useCurrentModel) {
         // Use the currently loaded model
         pivotToUse = phonePivot;
         screenPlaneToUse = customScreenPlane;
+        baseScaleToUse = baseModelScale;
     } else {
         // Use cached model for different device
         const cached = phoneModelCache[screenshotDeviceType];
@@ -847,6 +1038,9 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
         }
         pivotToUse = cached.pivot;
         screenPlaneToUse = cached.screenPlane;
+        // The cache stores each device's OWN baseScale - NOT the same as the current global
+        // baseModelScale, which belongs to whichever device is currently active.
+        baseScaleToUse = cached.baseScale;
 
         // Add cached pivot to scene temporarily
         threeScene.add(pivotToUse);
@@ -857,117 +1051,148 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
     const originalPosition = pivotToUse.position.clone();
     const originalScale = pivotToUse.scale.clone();
     const originalRotation = pivotToUse.rotation.clone();
-
-    // Hide the current model if we're using a different one
-    if (!useCurrentModel && phonePivot) {
-        phonePivot.visible = false;
-    }
-
-    // Temporarily update screen texture for this screenshot
-    // Use getScreenshotImage() for localized image support
-    const screenshotImage = typeof getScreenshotImage === 'function'
-        ? getScreenshotImage(screenshot)
-        : screenshot?.image;
-    const oldMaterial = screenPlaneToUse ? screenPlaneToUse.material : null;
-    if (screenshotImage && screenPlaneToUse) {
-        const cornerRadius = Math.round(screenshotImage.width * config.cornerRadiusFactor);
-        const roundedImage = createRoundedScreenImage(screenshotImage, cornerRadius);
-        const newTexture = new THREE.Texture(roundedImage);
-        newTexture.needsUpdate = true;
-        newTexture.encoding = THREE.sRGBEncoding;
-        newTexture.flipY = true;
-
-        const newMaterial = new THREE.MeshBasicMaterial({
-            map: newTexture,
-            side: THREE.FrontSide,
-            transparent: true
-        });
-        screenPlaneToUse.material = newMaterial;
-    }
-
-    // Apply frame color for this screenshot
-    if (ss.frameColor) {
-        if (useCurrentModel) {
-            setPhoneFrameColor(ss.frameColor, screenshotDeviceType);
-        } else {
-            setCachedModelFrameColor(ss.frameColor, screenshotDeviceType);
-        }
-    }
-
-    // Apply rotation for this screenshot + model base rotation
-    const rotation3D = ss.rotation3D || { x: 0, y: 0, z: 0 };
-    const modelRot = config.modelRotation || { x: 0, y: 0, z: 0 };
-    pivotToUse.rotation.set(
-        (rotation3D.x + modelRot.x) * Math.PI / 180,
-        (rotation3D.y + modelRot.y) * Math.PI / 180,
-        (rotation3D.z + modelRot.z) * Math.PI / 180
-    );
-
-    // Apply scale and position (matching 2D behavior)
-    const screenshotScale = ss.scale / 100;
-    pivotToUse.scale.setScalar(screenshotScale);
-    const availableSpaceY = (1 - screenshotScale) * 2;
-    const availableSpaceX = (1 - screenshotScale) * 0.9;
-    const xOffset = ((ss.x - 50) / 50) * availableSpaceX;
-    const yOffset = -((ss.y - 50) / 50) * availableSpaceY;
-    pivotToUse.position.set(
-        xOffset + basePositionOffset.x,
-        yOffset + basePositionOffset.y,
-        basePositionOffset.z
-    );
-
-    // Set transparent background for compositing
-    threeScene.background = null;
-    threeRenderer.setClearColor(0x000000, 0); // Fully transparent clear color
-
-    // Temporarily resize renderer
+    const originalCameraZ = threeCamera.position.z;
+    const originalCameraFov = threeCamera.fov;
     const oldSize = { width: 400, height: 700 };
-    threeRenderer.setSize(dims.width, dims.height);
-    threeCamera.aspect = dims.width / dims.height;
-    threeCamera.updateProjectionMatrix();
+    const oldMaterial = screenPlaneToUse ? screenPlaneToUse.material : null;
+    const originalPlanePosition = screenPlaneToUse ? screenPlaneToUse.position.clone() : null;
+    const originalPlaneScale = screenPlaneToUse ? screenPlaneToUse.scale.clone() : null;
 
-    // Clear the renderer before drawing (ensures clean transparency)
-    threeRenderer.clear();
-
-    // Render with transparency
-    threeRenderer.render(threeScene, threeCamera);
-
-    // Draw to target canvas (composite 3D phone onto existing background)
-    const ctx = targetCanvas.getContext('2d');
-    ctx.drawImage(threeRenderer.domElement, 0, 0, dims.width, dims.height);
-
-    // Restore everything
-    threeRenderer.setSize(oldSize.width, oldSize.height);
-    threeCamera.aspect = oldSize.width / oldSize.height;
-    threeCamera.updateProjectionMatrix();
-    threeScene.background = originalBackground;
-    pivotToUse.position.copy(originalPosition);
-    pivotToUse.scale.copy(originalScale);
-    pivotToUse.rotation.copy(originalRotation);
-
-    // Restore original material
-    if (oldMaterial && screenPlaneToUse) {
-        // Dispose the temporary material
-        if (screenPlaneToUse.material !== oldMaterial) {
-            screenPlaneToUse.material.map?.dispose();
-            screenPlaneToUse.material.dispose();
+    try {
+        // Hide the current model if we're using a different one
+        if (!useCurrentModel && phonePivot) {
+            phonePivot.visible = false;
         }
-        screenPlaneToUse.material = oldMaterial;
-    }
 
-    // Restore frame color on current model if we changed it
-    if (useCurrentModel && ss.frameColor && typeof state !== 'undefined') {
-        const currentSS = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
-        if (currentSS?.frameColor) {
-            setPhoneFrameColor(currentSS.frameColor, currentDeviceModel);
+        // Temporarily update screen texture for this screenshot
+        // Use getScreenshotImage() for localized image support
+        const screenshotImage = typeof getScreenshotImage === 'function'
+            ? getScreenshotImage(screenshot)
+            : screenshot?.image;
+        if (screenshotImage && screenPlaneToUse) {
+            const cornerRadius = Math.round(screenshotImage.width * config.cornerRadiusFactor);
+            const roundedImage = createRoundedScreenImage(screenshotImage, cornerRadius);
+            const newTexture = new THREE.Texture(roundedImage);
+            newTexture.needsUpdate = true;
+            newTexture.encoding = THREE.sRGBEncoding;
+            newTexture.flipY = true;
+
+            const newMaterial = new THREE.MeshBasicMaterial({
+                map: newTexture,
+                side: THREE.FrontSide,
+                transparent: true
+            });
+            screenPlaneToUse.material = newMaterial;
         }
-    }
 
-    // Clean up: remove cached model from scene and restore current model visibility
-    if (!useCurrentModel) {
-        threeScene.remove(pivotToUse);
-        if (phonePivot) {
-            phonePivot.visible = true;
+        // Apply frame color for this screenshot
+        if (ss.frameColor) {
+            if (useCurrentModel) {
+                setPhoneFrameColor(ss.frameColor, screenshotDeviceType);
+            } else {
+                setCachedModelFrameColor(ss.frameColor, screenshotDeviceType);
+            }
+        }
+
+        // Apply rotation for this screenshot + model base rotation
+        const rotation3D = ss.rotation3D || { x: 0, y: 0, z: 0 };
+        const modelRot = config.modelRotation || { x: 0, y: 0, z: 0 };
+        pivotToUse.rotation.set(
+            (rotation3D.x + modelRot.x) * Math.PI / 180,
+            (rotation3D.y + modelRot.y) * Math.PI / 180,
+            (rotation3D.z + modelRot.z) * Math.PI / 180
+        );
+
+        // Apply scale and position (matching 2D behavior)
+        const screenshotScale = ss.scale / 100;
+        pivotToUse.scale.setScalar(screenshotScale);
+        const availableSpaceY = (1 - screenshotScale) * 2;
+        const availableSpaceX = (1 - screenshotScale) * 0.9;
+        const xOffset = ((ss.x - 50) / 50) * availableSpaceX;
+        const yOffset = -((ss.y - 50) / 50) * availableSpaceY;
+        pivotToUse.position.set(
+            xOffset + basePositionOffset.x,
+            yOffset + basePositionOffset.y,
+            basePositionOffset.z
+        );
+
+        // Apply this screenshot's own fine-tune screen position nudge and scale
+        if (screenPlaneToUse) {
+            const planeHeight = (4.3 * config.screenHeightFactor) / baseScaleToUse;
+            const planeWidth = planeHeight * config.aspectRatio;
+            const pos = computeScreenPlaneOffset(config, planeWidth, planeHeight, ss.screenAdjust);
+            screenPlaneToUse.position.set(pos.x, pos.y, pos.z);
+            screenPlaneToUse.scale.setScalar((ss.screenScale || 100) / 100);
+        }
+
+        // Frame this screenshot's device with its own camera baseline (tablets vs phones
+        // need different distance/FOV) - restored to the currently active device below
+        const cam = config.camera || { distance: 6, fov: 35 };
+        threeCamera.position.z = cam.distance;
+        threeCamera.fov = cam.fov;
+
+        // Set transparent background for compositing
+        threeScene.background = null;
+        threeRenderer.setClearColor(0x000000, 0); // Fully transparent clear color
+
+        // Temporarily resize renderer
+        threeRenderer.setSize(dims.width, dims.height);
+        threeCamera.aspect = dims.width / dims.height;
+        threeCamera.updateProjectionMatrix();
+
+        // Clear the renderer before drawing (ensures clean transparency)
+        threeRenderer.clear();
+
+        // Render with transparency
+        threeRenderer.render(threeScene, threeCamera);
+
+        // Draw to target canvas (composite 3D phone onto existing background)
+        const ctx = targetCanvas.getContext('2d');
+        ctx.drawImage(threeRenderer.domElement, 0, 0, dims.width, dims.height);
+    } finally {
+        // Restore everything - always, even if the render/draw above threw, so a failed
+        // side-preview render can never leave its transform/texture/camera bled onto the
+        // next real paint of the main canvas
+        threeRenderer.setSize(oldSize.width, oldSize.height);
+        threeCamera.aspect = oldSize.width / oldSize.height;
+        threeCamera.position.z = originalCameraZ;
+        threeCamera.fov = originalCameraFov;
+        threeCamera.updateProjectionMatrix();
+        threeScene.background = originalBackground;
+        pivotToUse.position.copy(originalPosition);
+        pivotToUse.scale.copy(originalScale);
+        pivotToUse.rotation.copy(originalRotation);
+        if (screenPlaneToUse && originalPlanePosition) {
+            screenPlaneToUse.position.copy(originalPlanePosition);
+        }
+        if (screenPlaneToUse && originalPlaneScale) {
+            screenPlaneToUse.scale.copy(originalPlaneScale);
+        }
+
+        // Restore original material
+        if (oldMaterial && screenPlaneToUse) {
+            // Dispose the temporary material
+            if (screenPlaneToUse.material !== oldMaterial) {
+                screenPlaneToUse.material.map?.dispose();
+                screenPlaneToUse.material.dispose();
+            }
+            screenPlaneToUse.material = oldMaterial;
+        }
+
+        // Restore frame color on current model if we changed it
+        if (useCurrentModel && ss.frameColor && typeof state !== 'undefined') {
+            const currentSS = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
+            if (currentSS?.frameColor) {
+                setPhoneFrameColor(currentSS.frameColor, currentDeviceModel);
+            }
+        }
+
+        // Clean up: remove cached model from scene and restore current model visibility
+        if (!useCurrentModel) {
+            threeScene.remove(pivotToUse);
+            if (phonePivot) {
+                phonePivot.visible = true;
+            }
         }
     }
 }

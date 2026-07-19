@@ -38,6 +38,8 @@ const state = {
             use3D: false,
             device3D: 'iphone',
             rotation3D: { x: 0, y: 0, z: 0 },
+            screenAdjust: { x: 0, y: 0 },  // fine-tune nudge for the screenshot within the 3D device frame
+            screenScale: 100,  // fine-tune scale (%) of the screenshot within the 3D device frame
             shadow: {
                 enabled: true,
                 color: '#000000',
@@ -2088,6 +2090,22 @@ function duplicateScreenshot(index) {
 }
 
 // Populate frame color swatches for the given device and highlight the active one
+function syncDevice3DDropdown(deviceType) {
+    const menu = document.getElementById('device-3d-menu');
+    const nameLabel = document.getElementById('device-3d-name');
+    if (!menu || !nameLabel) return;
+
+    let matched = null;
+    menu.querySelectorAll('.device-3d-option').forEach(opt => {
+        const isMatch = opt.dataset.model === deviceType;
+        opt.classList.toggle('selected', isMatch);
+        if (isMatch) matched = opt;
+    });
+    if (matched) {
+        nameLabel.textContent = matched.textContent;
+    }
+}
+
 function updateFrameColorSwatches(deviceType, activeColorId) {
     const container = document.getElementById('frame-color-swatches');
     if (!container) return;
@@ -2284,9 +2302,7 @@ function syncUIWithState() {
     document.querySelectorAll('#device-type-selector button').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.type === (use3D ? '3d' : '2d'));
     });
-    document.querySelectorAll('#device-3d-selector button').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.model === device3D);
-    });
+    syncDevice3DDropdown(device3D);
     updateFrameColorSwatches(device3D, ss.frameColor);
     document.getElementById('rotation-3d-options').style.display = use3D ? 'block' : 'none';
     document.getElementById('rotation-3d-x').value = rotation3D.x;
@@ -2295,12 +2311,20 @@ function syncUIWithState() {
     document.getElementById('rotation-3d-y-value').textContent = formatValue(rotation3D.y) + '°';
     document.getElementById('rotation-3d-z').value = rotation3D.z;
     document.getElementById('rotation-3d-z-value').textContent = formatValue(rotation3D.z) + '°';
+    const screenAdjust = ss.screenAdjust || { x: 0, y: 0 };
+    document.getElementById('screen-adjust-x').value = screenAdjust.x;
+    document.getElementById('screen-adjust-x-value').textContent = formatValue(screenAdjust.x);
+    document.getElementById('screen-adjust-y').value = screenAdjust.y;
+    document.getElementById('screen-adjust-y-value').textContent = formatValue(screenAdjust.y);
+    const screenScale = ss.screenScale || 100;
+    document.getElementById('screen-adjust-scale').value = screenScale;
+    document.getElementById('screen-adjust-scale-value').textContent = formatValue(screenScale) + '%';
 
     // Hide 2D-only settings in 3D mode, show 3D tip
     document.getElementById('2d-only-settings').style.display = use3D ? 'none' : 'block';
     document.getElementById('position-presets-section').style.display = use3D ? 'none' : 'block';
     document.getElementById('frame-color-section').style.display = use3D ? 'block' : 'none';
-    document.getElementById('3d-tip').style.display = use3D ? 'flex' : 'none';
+    document.getElementById('3d-tip').style.display = use3D ? 'block' : 'none';
 
     // Show/hide 3D renderer and switch model if needed
     if (typeof showThreeJS === 'function') {
@@ -4631,7 +4655,7 @@ function setupEventListeners() {
             document.getElementById('2d-only-settings').style.display = use3D ? 'none' : 'block';
             document.getElementById('position-presets-section').style.display = use3D ? 'none' : 'block';
             document.getElementById('frame-color-section').style.display = use3D ? 'block' : 'none';
-            document.getElementById('3d-tip').style.display = use3D ? 'flex' : 'none';
+            document.getElementById('3d-tip').style.display = use3D ? 'block' : 'none';
 
             if (typeof showThreeJS === 'function') {
                 showThreeJS(use3D);
@@ -4645,13 +4669,28 @@ function setupEventListeners() {
         });
     });
 
-    // 3D device model selector
-    document.querySelectorAll('#device-3d-selector button').forEach(btn => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('#device-3d-selector button').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
+    // 3D device model dropdown
+    const device3DDropdown = document.getElementById('device-3d-dropdown');
+    const device3DTrigger = document.getElementById('device-3d-trigger');
 
-            const device3D = btn.dataset.model;
+    device3DTrigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        device3DDropdown.classList.toggle('open');
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!device3DDropdown.contains(e.target)) {
+            device3DDropdown.classList.remove('open');
+        }
+    });
+
+    document.querySelectorAll('#device-3d-menu .device-3d-option').forEach(opt => {
+        opt.addEventListener('click', (e) => {
+            e.stopPropagation();
+
+            const device3D = opt.dataset.model;
+            syncDevice3DDropdown(device3D);
+            device3DDropdown.classList.remove('open');
             setScreenshotSetting('device3D', device3D);
 
             // Reset frame color to first preset for new device
@@ -4703,6 +4742,38 @@ function setupEventListeners() {
         document.getElementById('rotation-3d-z-value').textContent = formatValue(e.target.value) + '°';
         if (typeof setThreeJSRotation === 'function') {
             setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
+        }
+        updateCanvas(); // Keep export canvas in sync
+    });
+
+    document.getElementById('screen-adjust-x').addEventListener('input', (e) => {
+        const ss = getScreenshotSettings();
+        if (!ss.screenAdjust) ss.screenAdjust = { x: 0, y: 0 };
+        ss.screenAdjust.x = parseInt(e.target.value);
+        document.getElementById('screen-adjust-x-value').textContent = formatValue(e.target.value);
+        if (typeof applyScreenAdjustOffset === 'function') {
+            applyScreenAdjustOffset(ss.screenAdjust.x, ss.screenAdjust.y);
+        }
+        updateCanvas(); // Keep export canvas in sync
+    });
+
+    document.getElementById('screen-adjust-y').addEventListener('input', (e) => {
+        const ss = getScreenshotSettings();
+        if (!ss.screenAdjust) ss.screenAdjust = { x: 0, y: 0 };
+        ss.screenAdjust.y = parseInt(e.target.value);
+        document.getElementById('screen-adjust-y-value').textContent = formatValue(e.target.value);
+        if (typeof applyScreenAdjustOffset === 'function') {
+            applyScreenAdjustOffset(ss.screenAdjust.x, ss.screenAdjust.y);
+        }
+        updateCanvas(); // Keep export canvas in sync
+    });
+
+    document.getElementById('screen-adjust-scale').addEventListener('input', (e) => {
+        const ss = getScreenshotSettings();
+        ss.screenScale = parseInt(e.target.value);
+        document.getElementById('screen-adjust-scale-value').textContent = formatValue(e.target.value) + '%';
+        if (typeof applyScreenScale === 'function') {
+            applyScreenScale(ss.screenScale);
         }
         updateCanvas(); // Keep export canvas in sync
     });
@@ -6405,6 +6476,7 @@ function updateScreenshotList() {
 
         item.addEventListener('drop', (e) => {
             e.preventDefault();
+            if (isSliding) return;
 
             // Determine drop position based on cursor
             const rect = item.getBoundingClientRect();
@@ -6447,6 +6519,7 @@ function updateScreenshotList() {
             if (e.target.closest('.screenshot-menu-wrapper') || e.target.closest('.drag-handle')) {
                 return;
             }
+            if (isSliding) return;
 
             // Handle transfer mode click
             if (state.transferTarget !== null) {
@@ -6530,6 +6603,7 @@ function updateScreenshotList() {
         if (duplicateBtn) {
             duplicateBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
+                if (isSliding) return;
                 menu?.classList.remove('open');
                 duplicateScreenshot(index);
             });
@@ -6540,6 +6614,7 @@ function updateScreenshotList() {
         if (deleteBtn) {
             deleteBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
+                if (isSliding) return;
                 menu?.classList.remove('open');
                 state.screenshots.splice(index, 1);
                 if (state.selectedIndex >= state.screenshots.length) {
