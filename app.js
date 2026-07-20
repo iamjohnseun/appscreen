@@ -74,13 +74,17 @@ const state = {
                     subheadlineSize: 50,
                     position: 'top',
                     offsetY: 12,
-                    lineHeight: 110
+                    lineHeight: 110,
+                    textAlign: 'center',
+                    textLayer: 'front'
                 }
             },
             currentLayoutLang: 'en',
             position: 'top',
             offsetY: 12,
             lineHeight: 110,
+            textAlign: 'center',
+            textLayer: 'front',
             subheadlineEnabled: false,
             subheadlines: { en: '' },
             subheadlineLanguages: ['en'],
@@ -125,6 +129,43 @@ function getBackground() {
     return screenshot ? screenshot.background : state.defaults.background;
 }
 
+// ===== Background clipboard (copy from one screenshot, paste into another) =====
+// Session-only (not persisted), same convention as the element clipboard.
+let copiedBackground = null;
+
+// Background can carry a live Image object (type: 'image') which JSON.stringify can't
+// round-trip - deep-clone everything JSON-safe, then restore the image reference by hand.
+function cloneBackgroundData(bg) {
+    const clone = JSON.parse(JSON.stringify(bg));
+    clone.image = bg.image || null;
+    return clone;
+}
+
+function copyCurrentBackground() {
+    const bg = getBackground();
+    if (!bg) return;
+    copiedBackground = cloneBackgroundData(bg);
+    updatePasteBackgroundButtonState();
+    flashClipboardButtonLabel('copy-background-btn-label', 'Copy Background', 'Copied!');
+}
+
+function pasteBackground() {
+    // Guard: only a validly-copied background (with a real type) can be pasted.
+    if (!copiedBackground || !copiedBackground.type) return;
+    const screenshot = getCurrentScreenshot();
+    if (!screenshot) return;
+
+    screenshot.background = cloneBackgroundData(copiedBackground);
+    syncUIWithState();
+    updateCanvas();
+    flashClipboardButtonLabel('paste-background-btn-label', 'Paste Background', 'Pasted!');
+}
+
+function updatePasteBackgroundButtonState() {
+    const btn = document.getElementById('paste-background-btn');
+    if (btn) btn.disabled = !copiedBackground;
+}
+
 function getScreenshotSettings() {
     const screenshot = getCurrentScreenshot();
     return screenshot ? screenshot.screenshot : state.defaults.screenshot;
@@ -157,7 +198,9 @@ function getTextLanguageSettings(text, lang) {
             subheadlineSize: sourceSettings ? sourceSettings.subheadlineSize : (text.subheadlineSize || 50),
             position: sourceSettings ? sourceSettings.position : (text.position || 'top'),
             offsetY: sourceSettings ? sourceSettings.offsetY : (typeof text.offsetY === 'number' ? text.offsetY : 12),
-            lineHeight: sourceSettings ? sourceSettings.lineHeight : (text.lineHeight || 110)
+            lineHeight: sourceSettings ? sourceSettings.lineHeight : (text.lineHeight || 110),
+            textAlign: sourceSettings ? sourceSettings.textAlign : (text.textAlign || 'center'),
+            textLayer: sourceSettings ? sourceSettings.textLayer : (text.textLayer || 'front')
         };
     }
     return text.languageSettings[lang];
@@ -170,7 +213,9 @@ function getEffectiveLayout(text, lang) {
             subheadlineSize: text.subheadlineSize || 50,
             position: text.position || 'top',
             offsetY: typeof text.offsetY === 'number' ? text.offsetY : 12,
-            lineHeight: text.lineHeight || 110
+            lineHeight: text.lineHeight || 110,
+            textAlign: text.textAlign || 'center',
+            textLayer: text.textLayer || 'front'
         };
     }
     return getTextLanguageSettings(text, lang);
@@ -232,6 +277,60 @@ function setElementProperty(id, key, value) {
         updateCanvas();
         updateElementsList();
     }
+}
+
+// ===== Element clipboard (copy from one screenshot, paste into another) =====
+// Session-only (not persisted) - resets on reload, matching how most editors treat clipboard.
+let copiedElement = null;
+
+// Elements can carry a live Image object (graphic/icon types) which JSON.stringify can't
+// round-trip - deep-clone everything JSON-safe, then restore the image reference by hand.
+// Sharing the same Image object across the original and any number of pasted copies is safe
+// since it's never mutated after load (same pattern used elsewhere in this app, e.g.
+// duplicateScreenshot()).
+function cloneElementData(el) {
+    const clone = JSON.parse(JSON.stringify(el));
+    clone.image = el.image || null;
+    return clone;
+}
+
+function copySelectedElement() {
+    const el = getSelectedElement();
+    if (!el) return;
+    copiedElement = cloneElementData(el);
+    updatePasteElementButtonState();
+    flashClipboardButtonLabel('copy-element-btn-label', 'Copy Element', 'Copied!');
+}
+
+function pasteElement() {
+    // Guard: only a validly-copied element (with a real type) can be pasted.
+    if (!copiedElement || !copiedElement.type) return;
+    const screenshot = getCurrentScreenshot();
+    if (!screenshot) return;
+    if (!screenshot.elements) screenshot.elements = [];
+
+    const clone = cloneElementData(copiedElement);
+    clone.id = crypto.randomUUID();
+    screenshot.elements.push(clone);
+    selectedElementId = clone.id;
+
+    updateCanvas();
+    updateElementsList();
+    updateElementProperties();
+    flashClipboardButtonLabel('paste-element-btn-label', 'Paste Element', 'Pasted!');
+}
+
+function updatePasteElementButtonState() {
+    const btn = document.getElementById('paste-element-btn');
+    if (btn) btn.disabled = !copiedElement;
+}
+
+// Briefly swap a clipboard button's label to confirm the action, then restore it.
+function flashClipboardButtonLabel(labelId, originalText, flashText) {
+    const label = document.getElementById(labelId);
+    if (!label) return;
+    label.textContent = flashText;
+    setTimeout(() => { label.textContent = originalText; }, 1200);
 }
 
 // ===== Popout accessors =====
@@ -364,6 +463,8 @@ function addTextElement() {
         fontWeight: '600',
         fontColor: '#ffffff',
         italic: false,
+        textAlign: 'center',
+        lineHeight: 105,
         frame: 'none',
         frameColor: '#ffffff',
         frameScale: 100
@@ -706,6 +807,31 @@ async function loadGoogleFont(fontName) {
     }
 }
 
+// Custom (user-uploaded) fonts - global list, backed by IndexedDB (CUSTOM_FONTS_STORE)
+const customFonts = [];
+const customFontsRegistered = new Set();
+// Remembers which picker's "Upload Font..." row was clicked, so the upload handler can
+// auto-select the new font in that specific picker once it's saved and registered.
+let pendingFontUploadTarget = null;
+
+// Register a custom font's bytes with the browser so canvas `ctx.font` can use it.
+// document.fonts is document-scoped, so this only needs to happen once per session per font -
+// every canvas in this app (live preview + export/temp canvases) shares the same document.
+async function registerCustomFont(entry) {
+    if (customFontsRegistered.has(entry.name)) return true;
+
+    try {
+        const fontFace = new FontFace(entry.name, entry.arrayBuffer);
+        await fontFace.load();
+        document.fonts.add(fontFace);
+        customFontsRegistered.add(entry.name);
+        return true;
+    } catch (error) {
+        console.warn(`Failed to register custom font: ${entry.name}`, error);
+        return false;
+    }
+}
+
 // Fetch all Google Fonts from the API (cached)
 async function fetchAllGoogleFonts() {
     if (googleFonts.allFonts) {
@@ -959,9 +1085,10 @@ const fontPickerState = {
     element: { category: 'popular', search: '' }
 };
 
-// Initialize all font pickers
-function initFontPicker() {
-    initSingleFontPicker('headline', {
+// ids config for each picker instance - kept at module scope (not local to initFontPicker())
+// so the custom-font upload/delete handlers can re-render all three pickers after a change.
+const fontPickerIds = {
+    headline: {
         picker: 'font-picker',
         trigger: 'font-picker-trigger',
         dropdown: 'font-picker-dropdown',
@@ -970,9 +1097,8 @@ function initFontPicker() {
         preview: 'font-picker-preview',
         hidden: 'headline-font',
         stateKey: 'headlineFont'
-    });
-
-    initSingleFontPicker('subheadline', {
+    },
+    subheadline: {
         picker: 'subheadline-font-picker',
         trigger: 'subheadline-font-picker-trigger',
         dropdown: 'subheadline-font-picker-dropdown',
@@ -981,9 +1107,8 @@ function initFontPicker() {
         preview: 'subheadline-font-picker-preview',
         hidden: 'subheadline-font',
         stateKey: 'subheadlineFont'
-    });
-
-    initSingleFontPicker('element', {
+    },
+    element: {
         picker: 'element-font-picker',
         trigger: 'element-font-picker-trigger',
         dropdown: 'element-font-picker-dropdown',
@@ -994,6 +1119,106 @@ function initFontPicker() {
         stateKey: 'font',
         getFont: () => { const el = getSelectedElement(); return el ? el.font : ''; },
         setFont: (value) => { if (selectedElementId) setElementProperty(selectedElementId, 'font', value); }
+    }
+};
+
+// Initialize all font pickers
+function initFontPicker() {
+    initSingleFontPicker('headline', fontPickerIds.headline);
+    initSingleFontPicker('subheadline', fontPickerIds.subheadline);
+    initSingleFontPicker('element', fontPickerIds.element);
+}
+
+// Re-render every picker instance's list - used after a custom font is uploaded or deleted,
+// since the customFonts list is global and all three pickers need to reflect the change.
+function renderAllFontPickers() {
+    Object.keys(fontPickerIds).forEach(pickerId => renderFontList(pickerId, fontPickerIds[pickerId]));
+}
+
+// Derive a default font family name from an uploaded file name, de-duped against already
+// uploaded custom fonts (mirrors the "(Copy)"-style bracketed-suffix convention used elsewhere
+// in this app, e.g. duplicateProject()).
+function deriveCustomFontName(fileName) {
+    const base = fileName
+        .replace(/\.(ttf|otf|woff2?|)$/i, '')
+        .replace(/[_-]+/g, ' ')
+        .trim() || 'Custom Font';
+
+    const existingNames = new Set(customFonts.map(f => f.name));
+    if (!existingNames.has(base)) return base;
+
+    let suffix = 2;
+    while (existingNames.has(`${base} (${suffix})`)) suffix++;
+    return `${base} (${suffix})`;
+}
+
+function setupCustomFontUpload() {
+    const input = document.getElementById('custom-font-input');
+    if (!input) return;
+
+    input.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        input.value = ''; // reset so re-selecting the same file still fires change
+        if (!file) return;
+
+        if (!/\.(ttf|otf|woff2?)$/i.test(file.name)) {
+            await showAppAlert('Please upload a .ttf, .otf, .woff, or .woff2 font file', 'error');
+            return;
+        }
+        if (file.size > 10 * 1024 * 1024) {
+            await showAppAlert('Font file is too large (max 10MB)', 'error');
+            return;
+        }
+
+        const arrayBuffer = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsArrayBuffer(file);
+        });
+
+        const candidateName = deriveCustomFontName(file.name);
+
+        // Attempt the real load first - this IS the validation (catches corrupted/mislabeled
+        // files that merely have a font-like extension) - nothing is persisted until it succeeds.
+        let fontFace;
+        try {
+            fontFace = new FontFace(candidateName, arrayBuffer);
+            await fontFace.load();
+        } catch (error) {
+            await showAppAlert('This file could not be read as a valid font', 'error');
+            return;
+        }
+
+        document.fonts.add(fontFace);
+        customFontsRegistered.add(candidateName);
+
+        const record = {
+            id: crypto.randomUUID(),
+            name: candidateName,
+            fileName: file.name,
+            mimeType: file.type,
+            arrayBuffer,
+            dateAdded: Date.now()
+        };
+
+        try {
+            await saveCustomFontToDB(record);
+        } catch (error) {
+            await showAppAlert('Could not save the font - please try again', 'error');
+            return;
+        }
+
+        customFonts.push(record);
+
+        // Auto-select the new font in whichever picker triggered the upload
+        const targetIds = pendingFontUploadTarget;
+        pendingFontUploadTarget = null;
+        if (targetIds) {
+            applyFontSelection(targetIds, candidateName, `'${candidateName}', sans-serif`);
+        }
+
+        renderAllFontPickers();
     });
 }
 
@@ -1054,6 +1279,33 @@ function initSingleFontPicker(pickerId, ids) {
 }
 
 // Render the font list for a specific picker
+// Apply a font selection to a picker instance: update its hidden input/state, preview label,
+// and trigger a re-render. Shared by the normal option-click handlers and the
+// select-immediately-after-upload flow, so both stay in sync with one code path.
+function applyFontSelection(ids, fontName, fontValue) {
+    document.getElementById(ids.hidden).value = fontValue;
+    if (ids.setFont) {
+        ids.setFont(fontValue);
+    } else {
+        setTextValue(ids.stateKey, fontValue);
+    }
+
+    const preview = document.getElementById(ids.preview);
+    preview.textContent = fontName;
+    preview.style.fontFamily = fontValue;
+
+    updateCanvas();
+}
+
+// Remove a custom font: delete from IndexedDB, drop from the in-memory list, and refresh every
+// picker instance (the store is global, so all three need to reflect the change).
+async function deleteCustomFont(fontId) {
+    await deleteCustomFontFromDB(fontId);
+    const index = customFonts.findIndex(f => f.id === fontId);
+    if (index !== -1) customFonts.splice(index, 1);
+    renderAllFontPickers();
+}
+
 async function renderFontList(pickerId, ids) {
     const fontList = document.getElementById(ids.list);
     if (!fontList) return;
@@ -1073,6 +1325,13 @@ async function renderFontList(pickerId, ids) {
             name,
             value: `'${name}', sans-serif`,
             category: 'google'
+        }));
+    } else if (pickerState.category === 'custom') {
+        fonts = customFonts.map(entry => ({
+            name: entry.name,
+            value: `'${entry.name}', sans-serif`,
+            category: 'custom',
+            id: entry.id
         }));
     } else {
         // All fonts
@@ -1098,6 +1357,58 @@ async function renderFontList(pickerId, ids) {
 
     // Limit to prevent performance issues
     const displayFonts = fonts.slice(0, 100);
+
+    // Custom category has its own rendering: an "Upload Font..." row always shown first, plus
+    // a delete button on each entry - different enough from the Google/system row shape that
+    // it's clearer as its own branch rather than threading extra conditionals through the
+    // generic path below.
+    if (pickerState.category === 'custom') {
+        const uploadRow = `
+            <div class="font-option font-option-upload" data-action="upload-font">
+                <span class="font-option-name">+ Upload Font…</span>
+            </div>
+        `;
+        const rows = displayFonts.length === 0
+            ? '<div class="font-picker-empty">No custom fonts yet</div>'
+            : displayFonts.map(font => {
+                const isSelected = currentFont && (currentFont.includes(font.name) || currentFont === font.value);
+                return `
+                    <div class="font-option ${isSelected ? 'selected' : ''}"
+                         data-font-name="${font.name}"
+                         data-font-value="${font.value}"
+                         data-font-category="custom"
+                         data-font-id="${font.id}">
+                        <span class="font-option-name" style="font-family: '${font.name}', sans-serif">${font.name}</span>
+                        <button class="font-option-delete" data-font-id="${font.id}" title="Remove font">×</button>
+                    </div>
+                `;
+            }).join('');
+        fontList.innerHTML = uploadRow + rows;
+
+        const uploadTrigger = fontList.querySelector('[data-action="upload-font"]');
+        if (uploadTrigger) {
+            uploadTrigger.addEventListener('click', () => {
+                pendingFontUploadTarget = ids;
+                document.getElementById('custom-font-input').click();
+            });
+        }
+
+        fontList.querySelectorAll('.font-option-delete').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                await deleteCustomFont(btn.dataset.fontId);
+            });
+        });
+
+        fontList.querySelectorAll('.font-option[data-font-category="custom"]').forEach(option => {
+            option.addEventListener('click', () => {
+                applyFontSelection(ids, option.dataset.fontName, option.dataset.fontValue);
+                document.getElementById(ids.dropdown).classList.remove('open');
+                renderFontList(pickerId, ids);
+            });
+        });
+        return;
+    }
 
     if (displayFonts.length === 0) {
         fontList.innerHTML = '<div class="font-picker-empty">No fonts found</div>';
@@ -1138,18 +1449,7 @@ async function renderFontList(pickerId, ids) {
                 option.querySelector('.font-option-category').classList.remove('font-option-loading');
             }
 
-            // Update state
-            document.getElementById(ids.hidden).value = fontValue;
-            if (ids.setFont) {
-                ids.setFont(fontValue);
-            } else {
-                setTextValue(ids.stateKey, fontValue);
-            }
-
-            // Update preview
-            const preview = document.getElementById(ids.preview);
-            preview.textContent = fontName;
-            preview.style.fontFamily = fontValue;
+            applyFontSelection(ids, fontName, fontValue);
 
             // Update selection in list
             fontList.querySelectorAll('.font-option').forEach(opt => opt.classList.remove('selected'));
@@ -1157,8 +1457,6 @@ async function renderFontList(pickerId, ids) {
 
             // Close dropdown
             document.getElementById(ids.dropdown).classList.remove('open');
-
-            updateCanvas();
         });
 
         // Preload font on hover for better UX
@@ -1201,8 +1499,10 @@ function updateSingleFontPickerPreview(hiddenId, previewId, stateKey) {
         const match = fontValue.match(/'([^']+)'/);
         if (match) {
             fontName = match[1];
-            // Load the font if it's a Google Font
-            loadGoogleFont(fontName);
+            // Load the font if it's a Google Font (skip for custom uploads - already registered)
+            if (!customFonts.some(f => f.name === fontName)) {
+                loadGoogleFont(fontName);
+            }
         }
     }
 
@@ -1228,7 +1528,9 @@ function updateElementFontPickerPreview(el) {
         const match = fontValue.match(/'([^']+)'/);
         if (match) {
             fontName = match[1];
-            loadGoogleFont(fontName);
+            if (!customFonts.some(f => f.name === fontName)) {
+                loadGoogleFont(fontName);
+            }
         }
     }
 
@@ -1323,9 +1625,10 @@ const noScreenshot = document.getElementById('no-screenshot');
 // IndexedDB for larger storage (can store hundreds of MB vs localStorage's 5-10MB)
 let db = null;
 const DB_NAME = 'AppStoreScreenshotGenerator';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const PROJECTS_STORE = 'projects';
 const META_STORE = 'meta';
+const CUSTOM_FONTS_STORE = 'customFonts';
 
 let currentProjectId = 'default';
 let projects = [{ id: 'default', name: 'Default Project', screenshotCount: 0 }];
@@ -1362,6 +1665,11 @@ function openDatabase() {
                 // Create meta store for project list and current project
                 if (!database.objectStoreNames.contains(META_STORE)) {
                     database.createObjectStore(META_STORE, { keyPath: 'key' });
+                }
+
+                // Create custom fonts store (global, not per-project)
+                if (!database.objectStoreNames.contains(CUSTOM_FONTS_STORE)) {
+                    database.createObjectStore(CUSTOM_FONTS_STORE, { keyPath: 'id' });
                 }
             };
 
@@ -1420,6 +1728,54 @@ function saveProjectsMeta() {
     }
 }
 
+// Custom Fonts (IndexedDB) - global store, not scoped to any one project
+function loadCustomFontsFromDB() {
+    if (!db) return Promise.resolve([]);
+
+    return new Promise((resolve) => {
+        try {
+            const transaction = db.transaction([CUSTOM_FONTS_STORE], 'readonly');
+            const store = transaction.objectStore(CUSTOM_FONTS_STORE);
+            const request = store.getAll();
+
+            transaction.oncomplete = () => resolve(request.result || []);
+            transaction.onerror = () => resolve([]);
+        } catch (e) {
+            resolve([]);
+        }
+    });
+}
+
+function saveCustomFontToDB(record) {
+    if (!db) return Promise.resolve();
+
+    return new Promise((resolve, reject) => {
+        try {
+            const transaction = db.transaction([CUSTOM_FONTS_STORE], 'readwrite');
+            transaction.objectStore(CUSTOM_FONTS_STORE).put(record);
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error);
+        } catch (e) {
+            reject(e);
+        }
+    });
+}
+
+function deleteCustomFontFromDB(id) {
+    if (!db) return Promise.resolve();
+
+    return new Promise((resolve) => {
+        try {
+            const transaction = db.transaction([CUSTOM_FONTS_STORE], 'readwrite');
+            transaction.objectStore(CUSTOM_FONTS_STORE).delete(id);
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => resolve();
+        } catch (e) {
+            resolve();
+        }
+    });
+}
+
 // Update project selector dropdown
 function updateProjectSelector() {
     const menu = document.getElementById('project-menu');
@@ -1462,6 +1818,8 @@ function updateProjectSelector() {
 async function init() {
     try {
         await openDatabase();
+        customFonts.push(...await loadCustomFontsFromDB());
+        await Promise.all(customFonts.map(registerCustomFont));
         await loadProjectsMeta();
         await loadState();
         syncUIWithState();
@@ -1481,6 +1839,7 @@ function initSync() {
     setupPopoutEventListeners();
     setupSliderResetButtons();
     initFontPicker();
+    setupCustomFontUpload();
     updateGradientStopsUI();
     updateCanvas();
     // Then load saved data asynchronously
@@ -1911,13 +2270,17 @@ function resetStateToDefaults() {
                     subheadlineSize: 50,
                     position: 'top',
                     offsetY: 12,
-                    lineHeight: 110
+                    lineHeight: 110,
+                    textAlign: 'center',
+                    textLayer: 'front'
                 }
             },
             currentLayoutLang: 'en',
             position: 'top',
             offsetY: 12,
             lineHeight: 110,
+            textAlign: 'center',
+            textLayer: 'front',
             subheadlineEnabled: false,
             subheadlines: { en: '' },
             subheadlineLanguages: ['en'],
@@ -2263,6 +2626,12 @@ function syncUIWithState() {
     document.querySelectorAll('#text-position button').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.position === layoutSettings.position);
     });
+    document.querySelectorAll('#text-layer button').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.layer === (layoutSettings.textLayer || 'front'));
+    });
+    document.querySelectorAll('#text-align button').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.align === (layoutSettings.textAlign || 'center'));
+    });
     document.getElementById('text-offset-y').value = layoutSettings.offsetY;
     document.getElementById('text-offset-y-value').textContent = formatValue(layoutSettings.offsetY) + '%';
     document.getElementById('line-height').value = layoutSettings.lineHeight;
@@ -2479,6 +2848,11 @@ function updateElementProperties() {
         document.getElementById('element-font-color').value = el.fontColor;
         document.getElementById('element-font-weight').value = el.fontWeight;
         document.getElementById('element-italic-btn').classList.toggle('active', el.italic);
+        document.querySelectorAll('#element-text-align button').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.align === (el.textAlign || 'center'));
+        });
+        document.getElementById('element-line-height').value = el.lineHeight || 105;
+        document.getElementById('element-line-height-value').textContent = formatValue(el.lineHeight || 105) + '%';
         document.getElementById('element-frame').value = el.frame || 'none';
         const frameOpts = document.getElementById('element-frame-options');
         frameOpts.style.display = el.frame && el.frame !== 'none' ? '' : 'none';
@@ -2516,6 +2890,13 @@ function updateElementProperties() {
 }
 
 function setupElementEventListeners() {
+    // Copy / Paste element
+    const copyElementBtn = document.getElementById('copy-element-btn');
+    if (copyElementBtn) copyElementBtn.addEventListener('click', copySelectedElement);
+    const pasteElementBtn = document.getElementById('paste-element-btn');
+    if (pasteElementBtn) pasteElementBtn.addEventListener('click', pasteElement);
+    updatePasteElementButtonState();
+
     // Add Graphic button
     const addGraphicBtn = document.getElementById('add-graphic-btn');
     const graphicInput = document.getElementById('element-graphic-input');
@@ -2723,6 +3104,27 @@ function setupElementEventListeners() {
                 setElementProperty(el.id, 'italic', !el.italic);
                 italicBtn.classList.toggle('active', el.italic);
             }
+        });
+    }
+
+    // Text align buttons
+    document.querySelectorAll('#element-text-align button').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (!selectedElementId) return;
+            document.querySelectorAll('#element-text-align button').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            setElementProperty(selectedElementId, 'textAlign', btn.dataset.align);
+        });
+    });
+
+    // Line height slider
+    const elementLineHeight = document.getElementById('element-line-height');
+    if (elementLineHeight) {
+        elementLineHeight.addEventListener('input', (e) => {
+            if (!selectedElementId) return;
+            const value = parseInt(e.target.value);
+            setElementProperty(selectedElementId, 'lineHeight', value);
+            document.getElementById('element-line-height-value').textContent = formatValue(value) + '%';
         });
     }
 
@@ -3631,6 +4033,21 @@ function setupEventListeners() {
         });
     });
 
+    // Left sidebar collapse/expand
+    const appContainer = document.querySelector('.app-container');
+    const sidebarCollapseBtn = document.getElementById('sidebar-collapse-btn');
+    const sidebarExpandBtn = document.getElementById('sidebar-expand-btn');
+    if (appContainer && sidebarCollapseBtn && sidebarExpandBtn) {
+        const setSidebarCollapsed = (collapsed) => {
+            appContainer.classList.toggle('sidebar-collapsed', collapsed);
+            sidebarExpandBtn.style.display = collapsed ? 'flex' : 'none';
+            localStorage.setItem('sidebarCollapsed', collapsed ? 'true' : 'false');
+        };
+        sidebarCollapseBtn.addEventListener('click', () => setSidebarCollapsed(true));
+        sidebarExpandBtn.addEventListener('click', () => setSidebarCollapsed(false));
+        setSidebarCollapsed(localStorage.getItem('sidebarCollapsed') === 'true');
+    }
+
     // File upload
     fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
 
@@ -4177,6 +4594,13 @@ function setupEventListeners() {
         });
     });
 
+    // Copy / Paste background
+    const copyBackgroundBtn = document.getElementById('copy-background-btn');
+    if (copyBackgroundBtn) copyBackgroundBtn.addEventListener('click', copyCurrentBackground);
+    const pasteBackgroundBtn = document.getElementById('paste-background-btn');
+    if (pasteBackgroundBtn) pasteBackgroundBtn.addEventListener('click', pasteBackground);
+    updatePasteBackgroundButtonState();
+
     // Gradient preset dropdown toggle
     const presetDropdown = document.getElementById('gradient-preset-dropdown');
     const presetTrigger = document.getElementById('gradient-preset-trigger');
@@ -4567,6 +4991,24 @@ function setupEventListeners() {
             document.querySelectorAll('#text-position button').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             setTextLanguageValue('position', btn.dataset.position);
+            updateCanvas();
+        });
+    });
+
+    document.querySelectorAll('#text-layer button').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('#text-layer button').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            setTextLanguageValue('textLayer', btn.dataset.layer);
+            updateCanvas();
+        });
+    });
+
+    document.querySelectorAll('#text-align button').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('#text-align button').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            setTextLanguageValue('textAlign', btn.dataset.align);
             updateCanvas();
         });
     });
@@ -6023,6 +6465,12 @@ function updateTextUI(text) {
     document.querySelectorAll('#text-position button').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.position === layoutSettings.position);
     });
+    document.querySelectorAll('#text-layer button').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.layer === (layoutSettings.textLayer || 'front'));
+    });
+    document.querySelectorAll('#text-align button').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.align === (layoutSettings.textAlign || 'center'));
+    });
     document.getElementById('text-offset-y').value = layoutSettings.offsetY;
     document.getElementById('text-offset-y-value').textContent = formatValue(layoutSettings.offsetY) + '%';
     document.getElementById('line-height').value = layoutSettings.lineHeight;
@@ -6896,6 +7344,13 @@ function updateCanvas() {
     // Elements behind screenshot
     drawElements(ctx, dims, 'behind-screenshot');
 
+    // Text layer: 'back' draws headline/subheadline behind the screenshot/device, 'front'
+    // (default) keeps today's behavior of drawing it after everything else below.
+    const textLayout = getEffectiveLayout(getTextSettings(), getTextLayoutLanguage(getTextSettings()));
+    if (textLayout.textLayer === 'back') {
+        drawText();
+    }
+
     // Draw screenshot (2D mode) or 3D phone model
     if (state.screenshots.length > 0) {
         const screenshot = state.screenshots[state.selectedIndex];
@@ -6920,8 +7375,10 @@ function updateCanvas() {
     // Draw popouts (cropped regions from source image)
     drawPopouts(ctx, dims);
 
-    // Draw text
-    drawText();
+    // Draw text (front layer only - 'back' already drew above)
+    if (textLayout.textLayer !== 'back') {
+        drawText();
+    }
 
     // Elements above text
     drawElements(ctx, dims, 'above-text');
@@ -7143,9 +7600,17 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
     }
 
     const elements = screenshot.elements || [];
+    const txt = screenshot.text;
 
     // Elements behind screenshot
     drawElementsToContext(targetCtx, dims, elements, 'behind-screenshot');
+
+    // Text layer: 'back' draws headline/subheadline behind the screenshot/device, 'front'
+    // (default) keeps today's behavior of drawing it after everything else below.
+    const textLayout = getEffectiveLayout(txt, getTextLayoutLanguage(txt));
+    if (textLayout.textLayer === 'back') {
+        drawTextToContext(targetCtx, dims, txt);
+    }
 
     // Draw screenshot - 3D if active for this screenshot, otherwise 2D
     const settings = screenshot.screenshot;
@@ -7168,9 +7633,10 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
     const popouts = screenshot.popouts || [];
     drawPopoutsToContext(targetCtx, dims, popouts, img, settings);
 
-    // Draw text
-    const txt = screenshot.text;
-    drawTextToContext(targetCtx, dims, txt);
+    // Draw text (front layer only - 'back' already drew above)
+    if (textLayout.textLayer !== 'back') {
+        drawTextToContext(targetCtx, dims, txt);
+    }
 
     // Elements above text
     drawElementsToContext(targetCtx, dims, elements, 'above-text');
@@ -7358,6 +7824,22 @@ function drawDeviceFrameToContext(context, x, y, width, height, settings) {
     context.globalAlpha = 1;
 }
 
+// Anchor x for fillText given an alignment ('left'/'center'/'right') - canvas's native
+// textAlign handles the glyph positioning once given this anchor.
+function getTextAlignAnchorX(align, dims, padding) {
+    if (align === 'left') return padding;
+    if (align === 'right') return dims.width - padding;
+    return dims.width / 2;
+}
+
+// Left edge x for a decoration rect (underline/strikethrough) of the given text width -
+// fillRect doesn't respect textAlign, so this needs its own per-alignment math.
+function getAlignedRectX(align, dims, padding, textWidth) {
+    if (align === 'left') return padding;
+    if (align === 'right') return dims.width - padding - textWidth;
+    return dims.width / 2 - textWidth / 2;
+}
+
 function drawTextToContext(context, dims, txt) {
     // Check enabled states (default headline to true for backwards compatibility)
     const headlineEnabled = txt.headlineEnabled !== false;
@@ -7380,7 +7862,9 @@ function drawTextToContext(context, dims, txt) {
         ? dims.height * (layoutSettings.offsetY / 100)
         : dims.height * (1 - layoutSettings.offsetY / 100);
 
-    context.textAlign = 'center';
+    const textAlign = layoutSettings.textAlign || 'center';
+    const anchorX = getTextAlignAnchorX(textAlign, dims, padding);
+    context.textAlign = textAlign;
     context.textBaseline = layoutSettings.position === 'top' ? 'top' : 'bottom';
 
     let currentY = textY;
@@ -7403,13 +7887,13 @@ function drawTextToContext(context, dims, txt) {
         lines.forEach((line, i) => {
             const y = currentY + i * lineHeight;
             lastLineY = y;
-            context.fillText(line, dims.width / 2, y);
+            context.fillText(line, anchorX, y);
 
             // Calculate text metrics for decorations
             const textWidth = context.measureText(line).width;
             const fontSize = headlineLayout.headlineSize;
             const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
+            const x = getAlignedRectX(textAlign, dims, padding, textWidth);
 
             // Draw underline
             if (txt.headlineUnderline) {
@@ -7447,9 +7931,10 @@ function drawTextToContext(context, dims, txt) {
         const subWeight = txt.subheadlineWeight || '400';
         context.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${txt.subheadlineFont || txt.headlineFont}`;
         context.fillStyle = hexToRgba(txt.subheadlineColor, txt.subheadlineOpacity / 100);
+        context.textAlign = textAlign;
 
         const lines = wrapText(context, subheadline, dims.width - padding * 2);
-        const subLineHeight = subheadlineLayout.subheadlineSize * 1.4;
+        const subLineHeight = subheadlineLayout.subheadlineSize * (layoutSettings.lineHeight / 100);
 
         // Subheadline starts after headline with gap determined by headline lineHeight
         // For bottom position, switch to 'top' baseline so subheadline draws downward
@@ -7460,13 +7945,13 @@ function drawTextToContext(context, dims, txt) {
 
         lines.forEach((line, i) => {
             const y = subY + i * subLineHeight;
-            context.fillText(line, dims.width / 2, y);
+            context.fillText(line, anchorX, y);
 
             // Calculate text metrics for decorations
             const textWidth = context.measureText(line).width;
             const fontSize = subheadlineLayout.subheadlineSize;
             const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
+            const x = getAlignedRectX(textAlign, dims, padding, textWidth);
 
             // Draw underline (using 'top' baseline for subheadline)
             if (txt.subheadlineUnderline) {
@@ -7548,12 +8033,16 @@ function drawElementsToContext(context, dims, elements, layer) {
             const fontStyle = el.italic ? 'italic' : 'normal';
             context.font = `${fontStyle} ${el.fontWeight} ${el.fontSize}px ${el.font}`;
             context.fillStyle = el.fontColor;
-            context.textAlign = 'center';
+            const textAlign = el.textAlign || 'center';
+            context.textAlign = textAlign;
             context.textBaseline = 'middle';
+            // Anchor x within the element's own local box (already translated/rotated to its
+            // origin above) - left/right edges are at -elWidth/2 and elWidth/2.
+            const anchorX = textAlign === 'left' ? -elWidth / 2 : textAlign === 'right' ? elWidth / 2 : 0;
 
             // Word-wrap text within element width (respects manual line breaks)
             const lines = wrapText(context, elText, elWidth);
-            const lineHeight = el.fontSize * 1.05;
+            const lineHeight = el.fontSize * ((el.lineHeight || 105) / 100);
             const totalHeight = (lines.length - 1) * lineHeight + el.fontSize;
 
             // Draw frame behind text if enabled
@@ -7564,7 +8053,7 @@ function drawElementsToContext(context, dims, elements, layer) {
             // Draw text lines
             const startY = -(totalHeight / 2) + el.fontSize / 2;
             lines.forEach((line, i) => {
-                context.fillText(line, 0, startY + i * lineHeight);
+                context.fillText(line, anchorX, startY + i * lineHeight);
             });
         }
 
@@ -7975,7 +8464,9 @@ function drawText() {
         ? dims.height * (layoutSettings.offsetY / 100)
         : dims.height * (1 - layoutSettings.offsetY / 100);
 
-    ctx.textAlign = 'center';
+    const textAlign = layoutSettings.textAlign || 'center';
+    const anchorX = getTextAlignAnchorX(textAlign, dims, padding);
+    ctx.textAlign = textAlign;
     ctx.textBaseline = layoutSettings.position === 'top' ? 'top' : 'bottom';
 
     let currentY = textY;
@@ -7997,14 +8488,14 @@ function drawText() {
         lines.forEach((line, i) => {
             const y = currentY + i * lineHeight;
             lastLineY = y;
-            ctx.fillText(line, dims.width / 2, y);
+            ctx.fillText(line, anchorX, y);
 
             // Calculate text metrics for decorations
             // When textBaseline is 'top', y is at top of text; when 'bottom', y is at bottom
             const textWidth = ctx.measureText(line).width;
             const fontSize = headlineLayout.headlineSize;
             const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
+            const x = getAlignedRectX(textAlign, dims, padding, textWidth);
 
             // Draw underline
             if (text.headlineUnderline) {
@@ -8042,9 +8533,10 @@ function drawText() {
         const subWeight = text.subheadlineWeight || '400';
         ctx.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${text.subheadlineFont || text.headlineFont}`;
         ctx.fillStyle = hexToRgba(text.subheadlineColor, text.subheadlineOpacity / 100);
+        ctx.textAlign = textAlign;
 
         const lines = wrapText(ctx, subheadline, dims.width - padding * 2);
-        const subLineHeight = subheadlineLayout.subheadlineSize * 1.4;
+        const subLineHeight = subheadlineLayout.subheadlineSize * (layoutSettings.lineHeight / 100);
 
         // Subheadline starts after headline with gap determined by headline lineHeight
         // For bottom position, switch to 'top' baseline so subheadline draws downward
@@ -8055,13 +8547,13 @@ function drawText() {
 
         lines.forEach((line, i) => {
             const y = subY + i * subLineHeight;
-            ctx.fillText(line, dims.width / 2, y);
+            ctx.fillText(line, anchorX, y);
 
             // Calculate text metrics for decorations
             const textWidth = ctx.measureText(line).width;
             const fontSize = subheadlineLayout.subheadlineSize;
             const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
+            const x = getAlignedRectX(textAlign, dims, padding, textWidth);
 
             // Draw underline (using 'top' baseline for subheadline)
             if (text.subheadlineUnderline) {
